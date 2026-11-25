@@ -3,7 +3,7 @@ import SwiftUI
 import AVKit
 import CryptoKit
 
-private enum TellyTab: String, CaseIterable { case live = "Live", home = "Discover", browse = "Browse", search = "Search", saved = "Saved", settings = "Settings" }
+private enum TellyTab: String, CaseIterable { case live = "Live", guide = "Guide", home = "Discover", browse = "Browse", search = "Search", saved = "Saved", settings = "Settings" }
 struct HomeView: View {
     @StateObject private var catalogue = CatalogueStore()
     @StateObject private var index = CatalogueIndexStore()
@@ -16,8 +16,8 @@ struct HomeView: View {
     @Environment(\.scenePhase) private var phase
     @ObservedObject private var profiles = ProfileStore.shared
     @State private var showProfilePicker = ProfileStore.shared.pickerRequired
-    /// Kids profiles see Home, Live and Saved only.
-    private var visibleTabs: [TellyTab] { TellyTab.allCases.filter { !profiles.kidsMode || [.home, .live, .saved].contains($0) } }
+    /// Kids profiles see Discover, Live, Guide and Saved only.
+    private var visibleTabs: [TellyTab] { TellyTab.allCases.filter { !profiles.kidsMode || [.home, .live, .guide, .saved].contains($0) } }
     /// Current person, after the tabs (only with 2+ profiles); opens the Who's watching picker.
     @ViewBuilder private var profileTab: some View {
         if profiles.profiles.count > 1 {
@@ -50,6 +50,7 @@ struct HomeView: View {
                 case .browse: BrowseView(catalogue: catalogue, library: library, index: index)
                 case .search: CatalogueSearchView(index: index, catalogue: catalogue, library: library)
                 case .live: LiveView(launch: liveLaunch)
+                case .guide: LiveView(showGuide: true)
                 case .saved: SavedProgrammes(catalogue: catalogue, library: library)
                 case .settings: SettingsView(catalogue: catalogue)
                 }
@@ -572,6 +573,7 @@ struct SavedProgrammes: View {
 }
 struct LiveView: View {
     var launch: LiveLaunch? = nil
+    var showGuide = false
     @Environment(\.scenePhase) private var phase
     @StateObject private var state = LiveState()
     @StateObject private var playback = PlaybackModel()
@@ -579,7 +581,6 @@ struct LiveView: View {
     @ObservedObject private var channel5Account = Channel5AccountModel.shared
     @State private var providerFilter: ContentProvider?
     @ObservedObject private var favourites = FavouriteChannels.shared
-    @AppStorage("liveMode") private var liveMode = "Channels"
     @EnvironmentObject private var history: WatchHistory
     @AppStorage("offerLiveFromStart") private var offerFromStart = false
     @State private var askFromStart: LiveChannel?
@@ -635,11 +636,10 @@ struct LiveView: View {
         "c4:C4", "c4:E4", "c4:M4", "c4:F4", "c4:4S", "c5:C5", "c5:C7", "c5:C6", "c5:C0", "c5:C8"]
     private var liveBody: some View {
         Group {
-            if liveMode == "Guide" {
+            if showGuide {
                 // The guide scrolls itself, keeping its programme panel in view.
                 VStack(alignment: .leading, spacing: 24) {
                     HStack(spacing: 30) {
-                        TellySegments(title: "Live view", options: ["Channels", "Guide"], selection: $liveMode).frame(width: 460)
                         NetworkFilter(selection: $providerFilter)
                     }
                     if let error = playback.error { Text(error).foregroundStyle(.orange) }
@@ -736,7 +736,6 @@ struct LiveView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 30) {
                 HStack(spacing: 30) {
-                    TellySegments(title: "Live view", options: ["Channels", "Guide"], selection: $liveMode).frame(width: 460)
                     NetworkFilter(selection: $providerFilter)
                 }
                 if let error = state.bbcError { Text(error).foregroundStyle(.orange) }

@@ -99,6 +99,8 @@ struct ChannelGuideView: View {
                                 .onAppear { gridWidth = width }
                                 .onChange(of: width) { _, value in gridWidth = value }
                         }
+                        .padding(.horizontal, -60)
+                        .ignoresSafeArea(.container, edges: .horizontal)
                     }
                 }
             }
