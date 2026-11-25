@@ -49,8 +49,8 @@ struct HomeView: View {
                     else { DiscoveryHome(catalogue: catalogue, library: library) }
                 case .browse: BrowseView(catalogue: catalogue, library: library, index: index)
                 case .search: CatalogueSearchView(index: index, catalogue: catalogue, library: library)
-                case .live: LiveView(launch: liveLaunch)
-                case .guide: LiveView(showGuide: true)
+                case .live: LiveView(launch: liveLaunch, library: library)
+                case .guide: LiveView(showGuide: true, library: library)
                 case .saved: SavedProgrammes(catalogue: catalogue, library: library)
                 case .settings: SettingsView(catalogue: catalogue)
                 }
@@ -574,6 +574,7 @@ struct SavedProgrammes: View {
 struct LiveView: View {
     var launch: LiveLaunch? = nil
     var showGuide = false
+    @ObservedObject var library: Library
     @Environment(\.scenePhase) private var phase
     @StateObject private var state = LiveState()
     @StateObject private var playback = PlaybackModel()
@@ -643,7 +644,7 @@ struct LiveView: View {
                         NetworkFilter(selection: $providerFilter)
                     }
                     if let error = playback.error { Text(error).foregroundStyle(.orange) }
-                    ChannelGuideView(channels: guideChannels, filter: providerFilter,
+                    ChannelGuideView(channels: guideChannels, library: library, filter: providerFilter,
                                      additionalStreams: ProfileStore.shared.kidsMode || (providerFilter ?? .bbc) != .bbc ? [] : AdditionalLiveStream.all,
                                      playLive: { play($0) },
                                      playStream: { stream in playback.startAdditional(stream) { state.playing = true } },

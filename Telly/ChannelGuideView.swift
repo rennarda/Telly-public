@@ -12,6 +12,7 @@ struct GuideSelection: Identifiable {
 /// another programme's start. Every cell keeps its true width; the panel above names the focused one.
 struct ChannelGuideView: View {
     let channels: [LiveChannel]
+    @ObservedObject var library: Library
     /// Show one broadcaster's rows; the schedules for every channel stay loaded, so switching is instant.
     var filter: ContentProvider? = nil
     /// Event streams without a published schedule (Red Button), listed under the channels.
@@ -161,7 +162,7 @@ struct ChannelGuideView: View {
                 focusTime = max(entry.start, start(Date()))
             }
         }
-        .sheet(item: $selection) { GuideEntryDetail(selection: $0, playLive: playLive, playEpisode: playEpisode) }
+        .sheet(item: $selection) { GuideEntryDetail(selection: $0, library: library, playLive: playLive, playEpisode: playEpisode) }
         #if DEBUG
         // BEEB_GUIDE_FOCUS="row,column" focuses that cell, counted from the programme on air,
         // for a layout check; BEEB_GUIDE_SELECT=1 then selects it.
@@ -609,17 +610,25 @@ private struct GuideCellSurface<Content: View>: View {
 /// Details for a programme that is not on air, with a route to the episode when BBC offers it.
 private struct GuideEntryDetail: View {
     let selection: GuideSelection
+    @ObservedObject var library: Library
     let playLive: (LiveChannel) -> Void
     let playEpisode: (Programme) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var opening = false
     @State private var error: String?
     @State private var image: URL?
+    @State private var show: CatalogueShow?
     private var past: Bool { selection.entry.isPast(at: Date()) }
     var body: some View {
         HStack(alignment: .top, spacing: 40) {
         VStack(alignment: .leading, spacing: 26) {
-            Text(selection.entry.title).font(.largeTitle).bold()
+            HStack {
+                Text(selection.entry.title).font(.largeTitle).bold()
+                Spacer()
+                if let show {
+                    ProgrammeBookmarkButton(show: show, library: library)
+                }
+            }
             if !selection.entry.subtitle.isEmpty { Text(selection.entry.subtitle).font(.title2) }
             HStack(spacing: 18) {
                 Text(ChannelGuide.times(selection.entry)).font(.title3.monospaced())
@@ -656,7 +665,31 @@ private struct GuideEntryDetail: View {
                 image = try? await ITVGuideMatch.resolve(selection.entry).image
             }
         }
+        .task(id: selection.id) { await findShow() }
         .onExitCommand { dismiss() }
+    }
+    private func findShow() async {
+        do {
+            let entry = selection.entry
+            let result: CatalogueShow?
+            switch selection.channel.provider {
+            case .bbc:
+                guard let id = entry.episodeID else { throw BBCError.message("No episode identifier") }
+                let episode = Programme(id: id, title: entry.title, summary: entry.synopsis, image: entry.image, version: "", guidance: nil)
+                result = try await DiscoveryAPI().parent(of: episode)
+            case .itv:
+                result = ITVGuideMatch.bestShow(try await ITVCatalogueAPI().search(entry.title), title: entry.title)
+            case .channel4:
+                result = ITVGuideMatch.bestShow(try await Channel4CatalogueAPI().search(entry.title), title: entry.title)
+            case .channel5:
+                result = ITVGuideMatch.bestShow(try await Channel5CatalogueAPI().search(entry.title), title: entry.title)
+            default: result = nil
+            }
+            guard !Task.isCancelled else { return }
+            show = result
+        } catch {
+            // No confident catalogue match: do not offer a bookmark.
+        }
     }
     /// Let this sheet leave before the player cover is presented over the Live page.
     private func close(then action: @escaping () -> Void) {
