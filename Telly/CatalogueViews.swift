@@ -643,7 +643,17 @@ struct LiveView: View {
         }.sheet(isPresented: $state.channel5Pairing, onDismiss: {
             if channel5Account.signedIn, let channel = state.selected, channel.provider == .channel5 { playback.startLive(channel) { state.playing = true } }
         }) { Channel5AccountView() }
-        .fullScreenCover(isPresented: $state.playing, onDismiss: { playback.stop() }) { PlaybackScreen(model: playback) }
+        .fullScreenCover(isPresented: $state.playing, onDismiss: { playback.stop() }) {
+            PlaybackScreen(model: playback, liveChannels: LiveChannelSection.allCases.flatMap { section in
+                LiveChannelOrder.sorted(state.channels.filter { LiveChannelOrder.section($0.id) == section }, id: { $0.id }, title: { $0.title })
+            }, switchChannel: { play($0) }, refreshLiveChannels: {
+                async let bbc: Void = state.refreshBBC()
+                async let itv: Void = state.refreshITV()
+                async let channel4: Void = state.refreshChannel4()
+                async let channel5: Void = state.refreshChannel5()
+                _ = await (bbc, itv, channel4, channel5)
+            })
+        }
         .modifier(LoadingBackAction(active: playback.loading) { playback.stop() })
         .onDisappear { if !state.playing { playback.stop() } }
     }

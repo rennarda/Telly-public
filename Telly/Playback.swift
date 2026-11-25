@@ -31,6 +31,7 @@ import AVKit
     @Published var displayTitle = ""
     @Published var displaySubtitle = ""
     @Published private(set) var isLive = false
+    @Published private(set) var liveChannelID: String?
     @Published private(set) var infoProgramme: Programme?
     @Published private(set) var infoArtwork: Data?
     @Published var activeSkip: SkipMarker?
@@ -93,6 +94,7 @@ import AVKit
             if channel.provider == .itv { return try await ITVLiveAPI().playbackSource(for: channel) }
             return try await DiscoveryAPI().liveSource(channel)
         }
+        liveChannelID = selected.id
     }
     /// Resolve first: an off-air event must not destroy the working channel.
     func switchAdditionalStream(_ stream: AdditionalLiveStream) {
@@ -444,7 +446,7 @@ import AVKit
         itvFairPlay?.stop(); itvFairPlay = nil; itvHTTP?.cancel(); itvHTTP = nil
         uhdAccess.stop()
         PlaybackActivity.active = false
-        isLive = false; infoProgramme = nil; infoArtwork = nil
+        isLive = false; liveChannelID = nil; infoProgramme = nil; infoArtwork = nil
         player.pause(); player.replaceCurrentItem(with: nil); loading = false; qualityBadge = nil
     }
     #if DEBUG
@@ -461,6 +463,8 @@ import AVKit
 struct NativePlayer: UIViewControllerRepresentable {
     @ObservedObject var model: PlaybackModel
     let closeScreen: () -> Void
+    var liveChannels: [LiveChannel] = []
+    var switchChannel: (LiveChannel) -> Void = { _ in }
     func makeCoordinator() -> Coordinator { Coordinator() }
     func makeUIViewController(context: Context) -> PlayerContainerViewController {
         let container = PlayerContainerViewController(badge: context.coordinator.badge)
@@ -485,6 +489,7 @@ struct NativePlayer: UIViewControllerRepresentable {
         let rates: [Float] = model.isLive ? [] : [0.5, 0.75, 1, 1.25, 1.5, 2]
         if controller.speeds.map(\.rate) != rates { controller.speeds = rates.map { AVPlaybackSpeed(rate: $0, localizedName: "\($0)×") } }
         container.configureMenus(isLive:model.isLive && model.provider == .bbc)
+        container.configureChannels(model.isLive ? liveChannels : [], currentID: model.liveChannelID, select: switchChannel)
         container.chooseAdditional = { [weak model] stream in model?.switchAdditionalStream(stream) }
         container.redAction.attributes = model.switchingAdditionalStream ? [.disabled] : []
         container.reportAdditionalError(model.additionalStreamError, id:model.additionalStreamErrorID)
@@ -515,7 +520,7 @@ struct NativePlayer: UIViewControllerRepresentable {
         func playerViewControllerShouldDismiss(_ playerViewController: AVPlayerViewController) -> Bool {
             // AVKit consumes Back to close Info/controls first. It asks for dismissal
             // only once its own UI is closed; dismiss the enclosing SwiftUI cover then.
-            close?()
+            if container?.dismissChannelsIfVisible() != true { close?() }
             return false
         }
     }
@@ -524,6 +529,14 @@ struct NativePlayer: UIViewControllerRepresentable {
 final class PlayerContainerViewController: UIViewController, UIGestureRecognizerDelegate {
     let playerController = AVPlayerViewController()
     let infoController = ProgrammeInfoViewController()
+    private var channelController: UIHostingController<LivePlayerChannels>?
+    private var channelsVisible = false
+    private var dismissingChannels = false
+    private var channelTimeout: Task<Void, Never>?
+    private var upGesture: UITapGestureRecognizer?
+    private var channelItems: [LiveChannel] = []
+    private var currentChannelID: String?
+    private var channelSelection: (LiveChannel) -> Void = { _ in }
     private var backExitArmed = false
     private var backGesture: PlayerBackGesture?
     var exitPlayer: (() -> Void)?
@@ -535,6 +548,15 @@ final class PlayerContainerViewController: UIViewController, UIGestureRecognizer
     private var lastAdditionalError: UUID?
     lazy var redAction = UIAction(title:"Additional streams", image:Self.redIcon()) { [weak self] _ in self?.showAdditionalStreams() }
     lazy var infoAction = UIAction(title: "Info", image: UIImage(systemName: "info.circle")) { [weak self] _ in self?.showInfo() }
+    static func textIcon(_ label: String) -> UIImage {
+        let attributes: [NSAttributedString.Key: Any] = [.font: UIFont.systemFont(ofSize: 18, weight: .semibold), .foregroundColor: UIColor.white]
+        let text = label as NSString
+        let measured = text.size(withAttributes: attributes)
+        let size = CGSize(width: max(40, measured.width + 8), height: 34)
+        return UIGraphicsImageRenderer(size: size).image { _ in
+            text.draw(at: CGPoint(x: (size.width - measured.width) / 2, y: (size.height - measured.height) / 2), withAttributes: attributes)
+        }.withRenderingMode(.alwaysTemplate)
+    }
     static func redIcon() -> UIImage {
         let size = CGSize(width:40,height:34)
         return UIGraphicsImageRenderer(size:size).image { _ in
@@ -547,7 +569,7 @@ final class PlayerContainerViewController: UIViewController, UIGestureRecognizer
     func configureMenus(isLive: Bool) {
         guard liveMenus != isLive || playerController.transportBarCustomMenuItems.isEmpty else { return }
         liveMenus = isLive
-        playerController.transportBarCustomMenuItems = isLive ? [redAction,infoAction] : [infoAction]
+        playerController.transportBarCustomMenuItems = isLive ? [redAction, infoAction] : [infoAction]
     }
     private func showAdditionalStreams() {
         guard liveMenus, presentedViewController == nil, !infoVisible else { return }
@@ -586,7 +608,8 @@ final class PlayerContainerViewController: UIViewController, UIGestureRecognizer
         let playerView = playerController.view!
         playerView.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(playerView)
-        NSLayoutConstraint.activate([playerView.leadingAnchor.constraint(equalTo: view.leadingAnchor), playerView.trailingAnchor.constraint(equalTo: view.trailingAnchor), playerView.topAnchor.constraint(equalTo: view.topAnchor), playerView.bottomAnchor.constraint(equalTo: view.bottomAnchor)])
+        let playerBottom = playerView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+        NSLayoutConstraint.activate([playerView.leadingAnchor.constraint(equalTo: view.leadingAnchor), playerView.trailingAnchor.constraint(equalTo: view.trailingAnchor), playerView.topAnchor.constraint(equalTo: view.topAnchor), playerBottom])
         playerController.didMove(toParent: self)
         badge.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(badge)
@@ -601,6 +624,21 @@ final class PlayerContainerViewController: UIViewController, UIGestureRecognizer
         input.cancelsTouchesInView = false; input.delaysTouchesBegan = false; input.delaysTouchesEnded = false
         input.delegate = self
         view.addGestureRecognizer(input)
+        let down = UITapGestureRecognizer(target: self, action: #selector(showChannels))
+        down.allowedPressTypes = [NSNumber(value: UIPress.PressType.downArrow.rawValue)]
+        down.cancelsTouchesInView = false
+        down.delegate = self
+        view.addGestureRecognizer(down)
+        let swipeDown = UISwipeGestureRecognizer(target: self, action: #selector(showChannels))
+        swipeDown.direction = .down
+        swipeDown.cancelsTouchesInView = false
+        swipeDown.delegate = self
+        view.addGestureRecognizer(swipeDown)
+        let up = UITapGestureRecognizer(target: self, action: #selector(dismissChannelsOnUp))
+        up.allowedPressTypes = [NSNumber(value: UIPress.PressType.upArrow.rawValue)]
+        up.cancelsTouchesInView = true
+        up.delegate = self; upGesture = up
+        view.addGestureRecognizer(up)
         let back = PlayerBackGesture(target: self, action: #selector(backPressed(_:)))
         back.minimumPressDuration = 0
         back.allowedPressTypes = [NSNumber(value: UIPress.PressType.menu.rawValue)]
@@ -615,6 +653,7 @@ final class PlayerContainerViewController: UIViewController, UIGestureRecognizer
     }
     override func viewDidDisappear(_ animated: Bool) {
         if let backGesture { backGesture.view?.removeGestureRecognizer(backGesture) }
+        channelTimeout?.cancel(); channelTimeout = nil
         super.viewDidDisappear(animated)
     }
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
@@ -639,15 +678,27 @@ final class PlayerContainerViewController: UIViewController, UIGestureRecognizer
         badge.alpha = controlsVisible ? 1 : 0; badge.setControlsVisible(controlsVisible)
         setNeedsFocusUpdate(); updateFocusIfNeeded()
     }
+    override func didUpdateFocus(in context: UIFocusUpdateContext, with coordinator: UIFocusAnimationCoordinator) {
+        super.didUpdateFocus(in: context, with: coordinator)
+        if channelsVisible { resetChannelTimeout() }
+    }
     override var preferredFocusEnvironments: [UIFocusEnvironment] {
-        infoVisible ? [infoController] : [playerController]
+        channelsVisible ? (channelController.map { [$0] } ?? [playerController]) : (infoVisible ? [infoController] : [playerController])
     }
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive press: UIPress) -> Bool {
+        if channelsVisible { resetChannelTimeout() }
+        if gestureRecognizer === upGesture { return channelsVisible && press.type == .upArrow }
+        if gestureRecognizer !== backGesture, press.type == .select {
+            // Note the press without claiming it: a recognised tap cancels the press for AVKit,
+            // so the transport bar's own buttons (Watch from start, Live, RED, Info) never fired.
+            nonBackInteraction()
+            return false
+        }
         if gestureRecognizer === backGesture, presentedViewController != nil {
             backExitArmed = true
             return false // Native Back dismisses the stream menu/error first.
         }
-        if gestureRecognizer === backGesture, infoVisible { return true }
+        if gestureRecognizer === backGesture, channelsVisible || infoVisible { return true }
         if gestureRecognizer === backGesture, !backExitArmed, controlsVisible {
             // Leave the first press to AVKit. Do not tear down/recreate its
             // controls while it is closing Info; that can reopen the panel.
@@ -659,13 +710,83 @@ final class PlayerContainerViewController: UIViewController, UIGestureRecognizer
     }
     @objc private func backPressed(_ gesture: PlayerBackGesture) {
         guard gesture.state == .began else { return }
-        if infoVisible {
+        if dismissingChannels { return }
+        if channelsVisible {
+            hideChannels()
+            gesture.isEnabled = false; gesture.isEnabled = true
+        } else if infoVisible {
             backTrace("Back: hide Info")
             hideInfo()
             gesture.isEnabled = false; gesture.isEnabled = true
         } else {
             backTrace("Back: exit")
             exitPlayer?()
+        }
+    }
+    func configureChannels(_ channels: [LiveChannel], currentID: String?, select: @escaping (LiveChannel) -> Void) {
+        let changed = channelItems != channels
+        channelItems = channels
+        currentChannelID = currentID
+        channelSelection = select
+        if channels.isEmpty && channelsVisible { hideChannels() }
+        else if changed, let host = channelController {
+            var content = host.rootView
+            content.channels = channels
+            host.rootView = content
+        }
+    }
+    @objc private func showChannels() {
+        guard !infoVisible, !channelsVisible, !channelItems.isEmpty, presentedViewController == nil else { return }
+        let host = UIHostingController(rootView: LivePlayerChannels(channels: channelItems, currentID: currentChannelID, select: { [weak self] channel in
+            guard let self else { return }
+            self.hideChannels()
+            self.channelSelection(channel)
+        }, dismiss: { [weak self] in self?.dismissChannelsIfVisible() }, interaction: { [weak self] in self?.resetChannelTimeout() }))
+        host.view.backgroundColor = .clear
+        addChild(host); view.addSubview(host.view); host.didMove(toParent: self)
+        host.view.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([host.view.leadingAnchor.constraint(equalTo: view.leadingAnchor), host.view.trailingAnchor.constraint(equalTo: view.trailingAnchor), host.view.bottomAnchor.constraint(equalTo: view.bottomAnchor), host.view.heightAnchor.constraint(equalToConstant: 400)])
+        channelController = host; channelsVisible = true; backExitArmed = false
+        resetChannelTimeout()
+        playerController.showsPlaybackControls = false
+        controlsVisible = false
+        badge.alpha = 0; badge.setControlsVisible(false)
+        view.layoutIfNeeded()
+        host.view.transform = CGAffineTransform(translationX: 0, y: 420)
+        UIView.animate(withDuration: 0.35, delay: 0, options: [.curveEaseOut, .beginFromCurrentState]) {
+            host.view.transform = .identity
+        }
+        setNeedsFocusUpdate(); updateFocusIfNeeded()
+    }
+    @discardableResult func dismissChannelsIfVisible() -> Bool {
+        if dismissingChannels { return true }
+        guard channelsVisible else { return false }
+        hideChannels()
+        return true
+    }
+    private func hideChannels() {
+        guard let host = channelController else { return }
+        channelsVisible = false
+        channelTimeout?.cancel(); channelTimeout = nil
+        dismissingChannels = true
+        channelController = nil
+        playerController.showsPlaybackControls = true
+        host.willMove(toParent: nil)
+        UIView.animate(withDuration: 0.25, delay: 0, options: [.curveEaseIn, .beginFromCurrentState], animations: {
+            host.view.transform = CGAffineTransform(translationX: 0, y: 420)
+        }, completion: { [weak self] _ in
+            host.view.removeFromSuperview(); host.removeFromParent()
+            self?.dismissingChannels = false
+        })
+        setNeedsFocusUpdate(); updateFocusIfNeeded()
+    }
+    @objc private func dismissChannelsOnUp() { _ = dismissChannelsIfVisible() }
+    private func resetChannelTimeout() {
+        channelTimeout?.cancel()
+        channelTimeout = Task { [weak self] in
+            do { try await Task.sleep(nanoseconds: 5_000_000_000) } catch { return }
+            guard !Task.isCancelled else { return }
+            self?.dismissChannelsIfVisible()
         }
     }
     @objc private func nonBackInteraction() { backTrace("Other input"); backExitArmed = false }
@@ -879,8 +1000,57 @@ private final class QualityBadgeLabel: UILabel {
     }
     override func drawText(in rect: CGRect) { super.drawText(in: rect.inset(by: insets)) }
 }
+private struct LivePlayerChannels: View {
+    var channels: [LiveChannel]
+    let currentID: String?
+    let select: (LiveChannel) -> Void
+    let dismiss: () -> Void
+    let interaction: () -> Void
+    @FocusState private var focusedChannel: String?
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            ScrollViewReader { proxy in
+            ScrollView(.horizontal) {
+                LazyHStack(alignment: .top, spacing: 28) {
+                    ForEach(channels) { channel in
+                        Button { select(channel) } label: {
+                            VStack(alignment: .leading, spacing: 8) {
+                                LiveChannelPreview(channel: channel, active: true)
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Text(channel.current?.title ?? channel.title).font(.headline).lineLimit(1)
+                                    Text(channel.title).font(.callout).foregroundStyle(.secondary).lineLimit(1)
+                                }.padding(.horizontal, 12).padding(.bottom, 12)
+                            }.frame(width: 350, alignment: .leading)
+                        }.buttonStyle(ProgrammeCardStyle()).focused($focusedChannel, equals: channel.id).id(channel.id)
+                    }
+                }.padding(.vertical, 18).padding(.horizontal, 12)
+            }
+            .onAppear {
+                let selected = channels.first { channel in
+                    currentID.map { channel.id == $0 } ?? false
+                }?.id ?? channels.first?.id
+                if let selected { proxy.scrollTo(selected, anchor: .center); focusedChannel = selected }
+            }
+            }
+        }.padding(.horizontal, 70).padding(.top, 24)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .background { glassBackground }
+            .onChange(of: focusedChannel) { _, _ in interaction() }
+            .onExitCommand(perform: dismiss)
+    }
+    @ViewBuilder private var glassBackground: some View {
+        if #available(tvOS 26.0, *) {
+            RoundedRectangle(cornerRadius: 32).fill(.clear).glassEffect(.regular, in: .rect(cornerRadius: 32))
+        } else {
+            RoundedRectangle(cornerRadius: 32).fill(.ultraThinMaterial)
+        }
+    }
+}
 struct PlaybackScreen: View {
     @ObservedObject var model: PlaybackModel
+    var liveChannels: [LiveChannel] = []
+    var switchChannel: (LiveChannel) -> Void = { _ in }
+    var refreshLiveChannels: () async -> Void = {}
     @Environment(\.scenePhase) private var phase
     @Environment(\.dismiss) private var dismiss
     @FocusState private var cancelNextFocused: Bool
@@ -891,7 +1061,7 @@ struct PlaybackScreen: View {
             NativePlayer(model:model,closeScreen:{
                 if model.upNext != nil { model.cancelAutoplay() }
                 else { model.stop(); dismiss() }
-            }).ignoresSafeArea()
+            }, liveChannels: liveChannels, switchChannel: switchChannel).ignoresSafeArea()
                 // AVKit draws its own activity wheel. Conceal that surface
                 // during catch-up as well as live buffering, keeping the player
                 // attached so playback, FairPlay and subtitles can progress.
@@ -922,6 +1092,14 @@ struct PlaybackScreen: View {
                     Text(error).foregroundStyle(.orange).frame(maxWidth: 850)
                     Button("Close player") { dismiss() }
                 }.padding(35).background(.black.opacity(0.9)).cornerRadius(16)
+            }
+        }
+        .task(id: model.isLive && phase == .active) {
+            guard model.isLive, phase == .active else { return }
+            while !Task.isCancelled {
+                do { try await Task.sleep(nanoseconds: 300_000_000_000) } catch { return }
+                guard !Task.isCancelled else { return }
+                await refreshLiveChannels()
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .tellyLaunchLive)) { _ in model.stop(); dismiss() }
