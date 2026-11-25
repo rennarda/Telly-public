@@ -20,6 +20,8 @@ struct ChannelGuideView: View {
     let playLive: (LiveChannel) -> Void
     var playStream: (AdditionalLiveStream) -> Void = { _ in }
     let playEpisode: (Programme) -> Void
+    @ObservedObject private var reminders = GuideReminders.shared
+    @AppStorage("automaticallySwitchScheduledProgrammes") private var autoSwitchScheduled = false
     @State private var guide = [GuideChannel]()
     @State private var loaded = false
     @State private var loadedDays = Set<Date>()
@@ -440,16 +442,21 @@ struct ChannelGuideView: View {
         let available = ChannelGuide.playable(entry, at: now)
         // Tinted like on-demand when it can be played back: confirmed catch-up, or an earlier ITV programme to look up.
         let onDemand = !onAir && (entry.onDemand || (entry.catchUp != nil && entry.isPast(at: now)))
-        return Button { activate(entry, on: channel) } label: { GuideCellLabel(entry: entry, onAir: onAir, onDemand: onDemand, roomy: width >= 120, continues: continues) }
+        return Button { activate(entry, on: channel) } label: { GuideCellLabel(entry: entry, onAir: onAir, onDemand: onDemand, roomy: width >= 120, continues: continues, reminded: reminders.contains(entry, channel)) }
             // No longer watchable: greyed out, but it still takes focus so Up and Down keep their column.
             .buttonStyle(GuideCellStyle(onAir: onAir, onDemand: onDemand, unavailable: !available))
             .focused($focusedCell, equals: cellID(channel, entry))
             .disabled(!reachable)   // the style ignores this: only the remote's path changes
             .frame(width: max(6, width - 6), height: rowHeight)
+            .overlay(alignment: .topTrailing) {
+                if width < 120 && reminders.contains(entry, channel) {
+                    Image(systemName: autoSwitchScheduled ? "eye.fill" : "alarm.fill").font(.system(size: 15)).padding(4).accessibilityHidden(true)
+                }
+            }
             // Drawn over the neighbours without changing the cell's frame, so the remote's path stays the same.
             .overlay(alignment: growsLeft ? .trailing : .leading) {
                 if expanded {
-                    GuideCellLabel(entry: entry, onAir: onAir, onDemand: onDemand, roomy: true, continues: continues)
+                    GuideCellLabel(entry: entry, onAir: onAir, onDemand: onDemand, roomy: true, continues: continues, reminded: reminders.contains(entry, channel))
                         .foregroundStyle(.black)
                         .frame(width: Self.expandedWidth, height: rowHeight)
                         .background(available ? Color.white : Color(white: 0.6), in: RoundedRectangle(cornerRadius: 12))
@@ -461,7 +468,7 @@ struct ChannelGuideView: View {
             .animation(.easeOut(duration: 0.12), value: expanded)
             .padding(.trailing, 6)
             .zIndex(expanded ? 1 : 0)
-            .accessibilityLabel("\(entry.title), \(channel.title), \(ChannelGuide.times(entry))" + (available ? "" : ", not available"))
+            .accessibilityLabel("\(entry.title), \(channel.title), \(ChannelGuide.times(entry))" + (available ? "" : ", not available") + (reminders.contains(entry, channel) ? ", reminder set" : ""))
     }
     /// Away from the focused row, only the nearest rows above and below (or the first row, from the day row) take
     /// focus, each at the focus time, so Up and Down move exactly one row and the focus engine can't skip one.
@@ -530,6 +537,8 @@ private struct GuideCellLabel: View {
     let roomy: Bool
     /// The programme began before the time on screen.
     let continues: Bool
+    var reminded = false
+    @AppStorage("automaticallySwitchScheduledProgrammes") private var autoSwitchScheduled = false
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             if roomy {
@@ -540,6 +549,7 @@ private struct GuideCellLabel: View {
                 if !entry.subtitle.isEmpty { Text(entry.subtitle).font(.system(size: 19)).opacity(0.7).lineLimit(1) }
                 HStack(spacing: 8) {
                     Text(onAir ? "On now" : ChannelGuide.clock(entry.start)).font(.system(size: 18, weight: .medium).monospaced())
+                    if reminded { Image(systemName: autoSwitchScheduled ? "eye.fill" : "alarm.fill").font(.system(size: 17)).accessibilityLabel("Reminder set") }
                     if onDemand { Image(systemName: "play.circle.fill").font(.system(size: 17)).accessibilityLabel("Available on demand") }
                 }.opacity(0.75).lineLimit(1)
             }
@@ -611,6 +621,8 @@ private struct GuideCellSurface<Content: View>: View {
 private struct GuideEntryDetail: View {
     let selection: GuideSelection
     @ObservedObject var library: Library
+    @ObservedObject private var reminders = GuideReminders.shared
+    @AppStorage("automaticallySwitchScheduledProgrammes") private var autoSwitchScheduled = false
     let playLive: (LiveChannel) -> Void
     let playEpisode: (Programme) -> Void
     @Environment(\.dismiss) private var dismiss
@@ -622,13 +634,7 @@ private struct GuideEntryDetail: View {
     var body: some View {
         HStack(alignment: .top, spacing: 40) {
         VStack(alignment: .leading, spacing: 26) {
-            HStack {
-                Text(selection.entry.title).font(.largeTitle).bold()
-                Spacer()
-                if let show {
-                    ProgrammeBookmarkButton(show: show, library: library)
-                }
-            }
+            Text(selection.entry.title).font(.largeTitle).bold()
             if !selection.entry.subtitle.isEmpty { Text(selection.entry.subtitle).font(.title2) }
             HStack(spacing: 18) {
                 Text(ChannelGuide.times(selection.entry)).font(.title3.monospaced())
@@ -636,9 +642,24 @@ private struct GuideEntryDetail: View {
                 if past { Text("Shown earlier").font(.callout).foregroundStyle(.secondary) }
                 if selection.entry.isRepeat { Text("Repeat").font(.callout).foregroundStyle(.secondary) }
             }
+            if reminders.contains(selection.entry, selection.channel) {
+                Text("Reminder set. Telly must be open to alert you.").font(.callout).foregroundStyle(.secondary)
+            }
             if !selection.entry.synopsis.isEmpty { Text(selection.entry.synopsis).font(.title3) }
             if let error { Text(error).foregroundStyle(.orange).font(.callout) }
             HStack(spacing: 24) {
+                if selection.entry.start > Date() {
+                    Button { reminders.toggle(selection.entry, selection.channel) } label: {
+                        Image(systemName: autoSwitchScheduled
+                              ? (reminders.contains(selection.entry, selection.channel) ? "eye.fill" : "eye")
+                              : (reminders.contains(selection.entry, selection.channel) ? "alarm.fill" : "alarm"))
+                            .font(.system(size: 32, weight: .medium))
+                    }.buttonStyle(OutlinedActionButtonStyle(square: true))
+                        .accessibilityLabel(reminders.contains(selection.entry, selection.channel) ? "Remove reminder" : "Set reminder")
+                }
+                if let show {
+                    ProgrammeBookmarkButton(show: show, library: library)
+                }
                 // Earlier programmes, repeats and box-set episodes are on iPlayer/Channel 4 already; ITV's are looked
                 // up on ITVX when asked for.
                 if selection.entry.onDemand, selection.entry.episodeID != nil {

@@ -9,6 +9,7 @@ struct HomeView: View {
     @StateObject private var index = CatalogueIndexStore()
     @StateObject private var library = Library()
     @StateObject private var history = WatchHistory()
+    @ObservedObject private var reminders = GuideReminders.shared
     @State private var liveLaunch: LiveLaunch?
     @State private var tab = TellyTab.live
     @State private var navigationRevision = 0
@@ -56,11 +57,33 @@ struct HomeView: View {
                 }
             }.id("\(tab.rawValue)-\(navigationRevision)")
         }.environmentObject(history).tint(Color(white: 0.75)).progressViewStyle(FTVProgressViewStyle()).defaultFocus($focusedTab, .live)
-        .onChange(of: profiles.current) { _, _ in if !visibleTabs.contains(tab) { tab = .home } }
+        .onChange(of: profiles.current) { _, _ in
+            reminders.reload()
+            if !visibleTabs.contains(tab) { tab = .home }
+        }
         .onChange(of: profiles.kidsMode) { _, _ in if !visibleTabs.contains(tab) { tab = .home } }
         .fullScreenCover(isPresented: $showProfilePicker) {
             WhoIsWatchingView(required: profiles.pickerRequired, dismiss: { showProfilePicker = false }) { id in
                 profiles.select(id); profiles.pickerRequired = false; showProfilePicker = false
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .guideReminderWatch)) { notification in
+            guard let id = notification.object as? String, LiveChannelLink.validID(id) else { return }
+            guard !profiles.kidsMode || ["cbbc", "cbeebies"].contains(id) else { return }
+            let title = notification.userInfo?["title"] as? String
+            if reminders.switchLive?(id, title ?? "") == true {
+                if let title { reminders.showSwitchMessage(title) }
+                return
+            }
+            if let title { reminders.showSwitchMessage(title) }
+            NotificationCenter.default.post(name: .tellyLaunchLive, object: nil)
+            liveLaunch = LiveLaunch(channelID: id); tab = .live
+        }
+        .task(id: phase) {
+            guard phase == .active else { return }
+            while !Task.isCancelled {
+                reminders.check()
+                do { try await Task.sleep(nanoseconds: 1_000_000_000) } catch { return }
             }
         }
         .onOpenURL { url in
@@ -710,7 +733,26 @@ struct LiveView: View {
             })
         }
         .modifier(LoadingBackAction(active: playback.loading) { playback.stop() })
-        .onDisappear { if !state.playing && !playback.pictureInPictureActive { playback.stop() } }
+        .onChange(of: state.playing) { _, playing in
+            if playing {
+                GuideReminders.shared.switchLive = { id, _ in
+                    guard state.playing, playback.isLive else { return false }
+                    let channel = state.channels.first { $0.id == id }
+                        ?? ITVLiveAPI.seed().first { $0.id == id }
+                        ?? Channel4CatalogueAPI.liveSeed.first { $0.id == id }
+                        ?? Channel5CatalogueAPI.liveSeed.first { $0.id == id }
+                        ?? LiveShelfChannel.defaults.first(where: { $0.id == id }).map { LiveChannel(id: $0.id, title: $0.title) }
+                    guard let channel else { return false }
+                    if channel.provider == .itv && !account.signedIn { return false }
+                    if channel.provider == .channel5 && !channel5Account.signedIn { return false }
+                    play(channel, fromStart: false)
+                    return true
+                }
+            } else { GuideReminders.shared.switchLive = nil }
+        }
+        .onDisappear {
+            if !state.playing && !playback.pictureInPictureActive { playback.stop(); GuideReminders.shared.switchLive = nil }
+        }
     }
     /// A live channel; long-press to add it to or remove it from Favourites.
     private func channelCard(_ channel: LiveChannel) -> some View {
@@ -884,6 +926,7 @@ struct SettingsView: View {
     @AppStorage("bbcOneRegion") private var bbcOne = "bbc_one_london"
     @AppStorage("bbcTwoRegion") private var bbcTwo = "bbc_two_england"
     @AppStorage("offerLiveFromStart") private var offerLiveFromStart = false
+    @AppStorage("automaticallySwitchScheduledProgrammes") private var autoSwitchScheduled = false
     @ObservedObject var catalogue: CatalogueStore
     @ObservedObject private var profileStore = ProfileStore.shared
     @AppStorage(TellySyncSettings.urlKey) private var syncURL = ""
@@ -965,6 +1008,9 @@ struct SettingsView: View {
                 Text("Playback automatically selects the best available quality, including 4K HDR when available. Live channel quality adapts to the stream each broadcaster supplies.").foregroundStyle(.secondary)
                 Text("Programme listings load only when you select a category or letter. Series and episodes load when you open a programme. Saved programmes include all their series.")
                 if let warning = catalogue.storageWarning { Text(warning).foregroundStyle(.orange) }
+                Toggle("Automatically switch to scheduled programmes", isOn: $autoSwitchScheduled)
+                Text("When a guide reminder is due, switch to its channel instead of showing a prompt. Telly must be open.")
+                    .font(.system(size: 22)).foregroundStyle(.secondary)
                 Toggle("Offer watch from start for live TV", isOn: $offerLiveFromStart)
                 Text("When on, opening a channel part-way through a programme asks whether to watch from the start or live. You can also jump back with Watch from start in the player. How far back you can go depends on the broadcaster.")
                     .font(.system(size: 22)).foregroundStyle(.secondary)

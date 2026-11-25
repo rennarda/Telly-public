@@ -1155,6 +1155,7 @@ private struct LivePlayerChannels: View {
 }
 struct PlaybackScreen: View {
     @ObservedObject var model: PlaybackModel
+    @ObservedObject private var reminders = GuideReminders.shared
     var liveChannels: [LiveChannel] = []
     var switchChannel: (LiveChannel) -> Void = { _ in }
     var restoreFromPictureInPicture: (@escaping (Bool) -> Void) -> Void = { $0(false) }
@@ -1193,6 +1194,13 @@ struct PlaybackScreen: View {
                         .background(.black.opacity(0.94),in:RoundedRectangle(cornerRadius:20))
                         .focusSection().padding(.bottom,70)
                 }
+            }
+            if let message = reminders.switchMessage {
+                VStack {
+                    Text(message).font(.title3).padding(.horizontal, 28).padding(.vertical, 18)
+                        .background(.black.opacity(0.85), in: Capsule())
+                    Spacer()
+                }.padding(.top, 90).allowsHitTesting(false)
             }
             if let error = model.error {
                 VStack(spacing: 24) {

@@ -1,6 +1,84 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import SwiftUI
 
+private struct ProgrammeReminder: Codable, Identifiable {
+    let id: String
+    let channelID: String
+    let channelTitle: String
+    let title: String
+    let start: Date
+    let end: Date
+}
+
+@MainActor final class GuideReminders: ObservableObject {
+    static let shared = GuideReminders()
+    @Published private var reminders: [ProgrammeReminder] = []
+    private var presenting = false
+    var switchLive: ((String, String) -> Bool)?
+    @Published var switchMessage: String?
+    private var toastTask: Task<Void, Never>?
+    func showSwitchMessage(_ title: String) {
+        switchMessage = "Switched to \(title) for your scheduled programme"
+        toastTask?.cancel()
+        toastTask = Task {
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            guard !Task.isCancelled else { return }
+            switchMessage = nil
+        }
+    }
+    private var key: String { "guide-reminders-v1-" + ProfileStore.currentID }
+
+    init() { reload() }
+    func reload() {
+        reminders = UserDefaults.standard.data(forKey: key).flatMap { try? JSONDecoder().decode([ProgrammeReminder].self, from: $0) } ?? []
+    }
+    private func save() {
+        if let data = try? JSONEncoder().encode(reminders) { UserDefaults.standard.set(data, forKey: key) }
+    }
+    private func id(_ entry: GuideEntry, _ channel: LiveChannel) -> String { channel.id + "/" + entry.id }
+    func contains(_ entry: GuideEntry, _ channel: LiveChannel) -> Bool { reminders.contains { $0.id == id(entry, channel) } }
+    func toggle(_ entry: GuideEntry, _ channel: LiveChannel) {
+        let identifier = id(entry, channel)
+        if contains(entry, channel) { reminders.removeAll { $0.id == identifier } }
+        else if entry.start > Date() {
+            reminders.append(ProgrammeReminder(id: identifier, channelID: channel.id, channelTitle: channel.title, title: entry.title, start: entry.start, end: entry.end))
+        }
+        save()
+    }
+    func check() {
+        let now = Date()
+        let before = reminders.count
+        reminders.removeAll { $0.end <= now }
+        if reminders.count != before { save() }
+        guard !presenting, let reminder = reminders.filter({ $0.start <= now }).min(by: { $0.start < $1.start }),
+              let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first(where: { $0.activationState == .foregroundActive }),
+              var controller = scene.windows.first(where: { $0.isKeyWindow })?.rootViewController else { return }
+        while let presented = controller.presentedViewController { controller = presented }
+        guard !(controller is UIAlertController), !controller.isBeingDismissed, controller.viewIfLoaded?.window != nil else { return }
+        if UserDefaults.standard.bool(forKey: "automaticallySwitchScheduledProgrammes") {
+            reminders.removeAll { $0.id == reminder.id }; save()
+            NotificationCenter.default.post(name: .guideReminderWatch, object: reminder.channelID,
+                                            userInfo: ["title": reminder.title, "automatic": true])
+            return
+        }
+        presenting = true
+        let profile = ProfileStore.currentID
+        let alert = UIAlertController(title: reminder.title, message: "Starting now on \(reminder.channelTitle)", preferredStyle: .alert)
+        func finish(_ watch: Bool) {
+            self.presenting = false
+            if profile == ProfileStore.currentID {
+                self.reminders.removeAll { $0.id == reminder.id }; self.save()
+                if watch { NotificationCenter.default.post(name: .guideReminderWatch, object: reminder.channelID) }
+            }
+        }
+        alert.addAction(UIAlertAction(title: "Watch live", style: .default) { _ in finish(true) })
+        alert.addAction(UIAlertAction(title: "Dismiss", style: .cancel) { _ in finish(false) })
+        controller.present(alert, animated: true)
+    }
+}
+
+extension Notification.Name { static let guideReminderWatch = Notification.Name("GuideReminderWatch") }
+
 @main struct TellyApp: App {
     var body: some Scene {
         WindowGroup {
