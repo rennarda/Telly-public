@@ -2,14 +2,14 @@
 import SwiftUI
 import CryptoKit
 
-private enum TellyTab: String, CaseIterable { case home = "Home", browse = "Browse", search = "Search", live = "Live", saved = "Saved", settings = "Settings" }
+private enum TellyTab: String, CaseIterable { case live = "Live", home = "Discover", browse = "Browse", search = "Search", saved = "Saved", settings = "Settings" }
 struct HomeView: View {
     @StateObject private var catalogue = CatalogueStore()
     @StateObject private var index = CatalogueIndexStore()
     @StateObject private var library = Library()
     @StateObject private var history = WatchHistory()
     @State private var liveLaunch: LiveLaunch?
-    @State private var tab = TellyTab.home
+    @State private var tab = TellyTab.live
     @State private var navigationRevision = 0
     @FocusState private var focusedTab: TellyTab?
     @Environment(\.scenePhase) private var phase
@@ -38,7 +38,7 @@ struct HomeView: View {
                 case .settings: SettingsView(catalogue: catalogue)
                 }
             }.id("\(tab.rawValue)-\(navigationRevision)")
-        }.environmentObject(history).tint(Color(white: 0.75)).progressViewStyle(FTVProgressViewStyle()).defaultFocus($focusedTab, .home)
+        }.environmentObject(history).tint(Color(white: 0.75)).progressViewStyle(FTVProgressViewStyle()).defaultFocus($focusedTab, .live)
         .onOpenURL { url in
             guard let id = LiveChannelLink.channelID(from: url) else { return }
             NotificationCenter.default.post(name: .tellyLaunchLive, object: nil)
