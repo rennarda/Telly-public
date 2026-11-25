@@ -21,6 +21,8 @@ struct ChannelGuideView: View {
     let playEpisode: (Programme) -> Void
     @State private var guide = [GuideChannel]()
     @State private var loaded = false
+    @State private var loadedDays = Set<Date>()
+    @State private var loadingDays = Set<Date>()
     @State private var selection: GuideSelection?
     @FocusState private var focusedCell: String?
     @FocusState private var focusedDay: Date?
@@ -40,9 +42,9 @@ struct ChannelGuideView: View {
     private let rulerHeight: CGFloat = 40
     private let channelWidth: CGFloat = 230
     private let gap: CGFloat = 8
-    /// Five days of earlier programmes that can still be watched, then the next 24 hours.
+    /// Five days of earlier programmes and seven days ahead.
     private let hoursBack = 5 * 24
-    private let hoursAhead = 24
+    private let hoursAhead = 7 * 24
     private static let streamPrefix = "stream/"
     /// A channel without listings for the time on screen: one tile that plays it live.
     private static let holdPrefix = "hold/"
@@ -51,7 +53,7 @@ struct ChannelGuideView: View {
     private static let edgePrefix = "edge/"
     private var span: TimeInterval { Double(gridWidth / pointsPerMinute) * 60 }
     private func earliest(_ now: Date) -> Date { ChannelGuide.origin(for: now, hoursBack: hoursBack) }
-    private func latest(_ now: Date) -> Date { earliest(now).addingTimeInterval(Double(hoursBack + hoursAhead) * 3600) }
+    private func latest(_ now: Date) -> Date { Calendar.current.date(byAdding: .day, value: 8, to: Calendar.current.startOfDay(for: now)) ?? now }
     /// The window on screen, kept inside the loaded schedule.
     private func start(_ now: Date) -> Date {
         let lastStart = max(earliest(now), latest(now).addingTimeInterval(-span))
@@ -96,6 +98,11 @@ struct ChannelGuideView: View {
                         GeometryReader { geometry in
                             let width = max(600, geometry.size.width - channelWidth - gap)
                             grid(now: context.date, width: width)
+                                .overlay {
+                                    if loadingDays.contains(Calendar.current.startOfDay(for: start(context.date))) {
+                                        ProgressView("Getting schedules…").padding().background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                                    }
+                                }
                                 .onAppear { gridWidth = width }
                                 .onChange(of: width) { _, value in gridWidth = value }
                         }
@@ -113,15 +120,18 @@ struct ChannelGuideView: View {
                 if !PlaybackActivity.active {
                     if !loaded {
                         // The next few hours first, so the guide opens quickly; then the whole range.
-                        let first = await ChannelGuide.load(channels, from: ChannelGuide.origin(for: Date()), perPage: 100)
+                        let now = Date()
+                        let end = Calendar.current.date(byAdding: .day, value: 1, to: Calendar.current.startOfDay(for: now)) ?? now
+                        let first = await ChannelGuide.load(channels, from: ChannelGuide.origin(for: now), until: end, perPage: 100)
                         guard !Task.isCancelled else { return }
                         guide = first; loaded = true
                     }
                     let now = Date()
-                    let fresh = await ChannelGuide.load(channels, from: earliest(now), until: latest(now), perPage: 100)
+                    let end = Calendar.current.date(byAdding: .day, value: 1, to: Calendar.current.startOfDay(for: now)) ?? now
+                    let fresh = await ChannelGuide.load(channels, from: earliest(now), until: end, perPage: 100)
                     guard !Task.isCancelled else { return }
                     // Keep the last good schedule if a refresh returns nothing.
-                    if !loaded || fresh.contains(where: { !$0.entries.isEmpty }) { guide = fresh }
+                    if fresh.contains(where: { !$0.entries.isEmpty }) { mergeGuide(fresh) }
                     loaded = true
                 }
                 do { try await Task.sleep(nanoseconds: 600_000_000_000) } catch { return }
@@ -222,7 +232,8 @@ struct ChannelGuideView: View {
         let today = calendar.startOfDay(for: now)
         let days = (-(hoursBack / 24)...(hoursAhead / 24)).compactMap { calendar.date(byAdding: .day, value: $0, to: today) }
         let shown = calendar.startOfDay(for: start(now).addingTimeInterval(span / 2))
-        return HStack(spacing: 6) {
+        return ScrollView(.horizontal) {
+        HStack(spacing: 6) {
             ForEach(days, id: \.self) { day in
                 let selected = calendar.isDate(day, inSameDayAs: shown)
                 Button { jump(to: day, now: now) } label: { Text(calendar.isDate(day, inSameDayAs: today) ? "Now" : Self.dayName(day, now: now)) }
@@ -230,6 +241,7 @@ struct ChannelGuideView: View {
                     .focused($focusedDay, equals: day)
                     .accessibilityAddTraits(selected ? .isSelected : [])
             }
+        }
         }
             // Over the timeline, so Down from any day has a programme beneath it; the section spans the full
             // width so Up from anywhere in the guide reaches the days rather than the top bar.
@@ -247,10 +259,32 @@ struct ChannelGuideView: View {
     private func jump(to day: Date, now: Date) {
         let calendar = Calendar.current
         if calendar.isDateInToday(day) { windowStart = nil; focusTime = nil; return }
+        if day > calendar.startOfDay(for: now) { loadDay(day) }
         let current = start(now)
         let target = day.addingTimeInterval(current.timeIntervalSince(calendar.startOfDay(for: current)))
         windowStart = target
         focusTime = max(target, earliest(now))
+    }
+    private func mergeGuide(_ incoming: [GuideChannel]) {
+        let existing = Dictionary(guide.map { ($0.id, $0.entries) }, uniquingKeysWith: { first, _ in first })
+        guide = incoming.map { row in
+            var entries = Dictionary((existing[row.id] ?? []).map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+            for entry in row.entries { entries[entry.id] = entry }
+            return GuideChannel(channel: row.channel, entries: entries.values.sorted { $0.start < $1.start })
+        }
+    }
+    private func loadDay(_ day: Date) {
+        guard !loadedDays.contains(day), !loadingDays.contains(day),
+              let end = Calendar.current.date(byAdding: .day, value: 1, to: day) else { return }
+        loadingDays.insert(day)
+        Task {
+            let result = await ChannelGuide.load(channels, from: day, until: end, perPage: 100)
+            loadingDays.remove(day)
+            if result.contains(where: { !$0.entries.isEmpty }) {
+                mergeGuide(result)
+                loadedDays.insert(day)
+            }
+        }
     }
     private static func streamDescription(_ stream: AdditionalLiveStream) -> String {
         let extra = stream.id == "uk_bbc_stream_041" ? "Events in Ultra HD when they're on." : "Extra live coverage when it's on, such as sport and events."
@@ -580,8 +614,10 @@ private struct GuideEntryDetail: View {
     @Environment(\.dismiss) private var dismiss
     @State private var opening = false
     @State private var error: String?
+    @State private var image: URL?
     private var past: Bool { selection.entry.isPast(at: Date()) }
     var body: some View {
+        HStack(alignment: .top, spacing: 40) {
         VStack(alignment: .leading, spacing: 26) {
             Text(selection.entry.title).font(.largeTitle).bold()
             if !selection.entry.subtitle.isEmpty { Text(selection.entry.subtitle).font(.title2) }
@@ -604,7 +640,22 @@ private struct GuideEntryDetail: View {
                 if !past { Button("Watch \(selection.channel.title) live") { close { playLive(selection.channel) } }.disabled(opening) }
                 Button("Close") { dismiss() }
             }.buttonStyle(OutlinedActionButtonStyle())
+        }
+        if let image {
+            ProgrammeThumbnail(url: image, uhd: false)
+                .frame(width: 560)
+                .accessibilityHidden(true)
+        }
         }.padding(70)
+        .task(id: selection.id) {
+            image = selection.entry.image
+            guard image == nil else { return }
+            if selection.channel.provider == .bbc, let id = selection.entry.episodeID {
+                image = try? await BBCService().programme(id).image
+            } else if selection.entry.catchUp == .itv, past {
+                image = try? await ITVGuideMatch.resolve(selection.entry).image
+            }
+        }
         .onExitCommand { dismiss() }
     }
     /// Let this sheet leave before the player cover is presented over the Live page.

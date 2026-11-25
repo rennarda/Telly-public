@@ -17,6 +17,7 @@ struct GuideEntry: Identifiable, Hashable {
     /// (ITV: the Freeview schedule says nothing about catch-up, so an earlier ITV programme is looked up on ITVX when
     /// the user selects it). nil when there is nothing to look up.
     var catchUp: ContentProvider? = nil
+    var image: URL? = nil
     func isOnAir(at date: Date) -> Bool { start <= date && date < end }
     func isPast(at date: Date) -> Bool { end <= date }
 }
@@ -67,10 +68,12 @@ enum ChannelGuide {
             guard seen.insert(id).inserted else { return nil }
             let synopses = episode["synopses"] as? [String: Any] ?? [:]
             let episodeID = (episode["id"] as? String).flatMap { try? BBCService.pid($0) }
+            let image = (episode["images"] as? [String: Any])?["standard"] as? String
             return GuideEntry(id: id, start: start, end: end, title: title, subtitle: episode["subtitle"] as? String ?? "",
                               synopsis: ["medium", "small", "large"].compactMap { synopses[$0] as? String }.first { !$0.isEmpty } ?? "",
                               episodeID: episodeID, onDemand: episode["status"] as? String == "available",
-                              isRepeat: broadcast["repeat"] as? Bool == true)
+                              isRepeat: broadcast["repeat"] as? Bool == true,
+                              image: image.flatMap { URL(string: $0.replacingOccurrences(of: "{recipe}", with: "640x360")) })
         }.sorted { $0.start < $1.start }
     }
     /// Every channel's schedule: BBC from iPlayer, Channel 4 from its own TV guide, ITV and Channel 5 from Freeview's
@@ -113,7 +116,8 @@ enum ChannelGuide {
                 let catchUp = slot["isOnCatchup"] as? Bool == true && programme != nil
                 return GuideEntry(id: "c4:\(code):\(slotID)", start: start, end: end, title: title, subtitle: "",
                                   synopsis: slot["summary"] as? String ?? "", episodeID: programme.map { "c4:" + $0 },
-                                  onDemand: catchUp, isRepeat: slot["isRepeat"] as? Bool == true)
+                                  onDemand: catchUp, isRepeat: slot["isRepeat"] as? Bool == true,
+                                  image: Channel4CatalogueAPI.image(slot["image"]))
             }
         }
         return result
