@@ -55,8 +55,13 @@ struct HomeView: View {
                 case .saved: SavedProgrammes(catalogue: catalogue, library: library)
                 case .settings: SettingsView(catalogue: catalogue)
                 }
-            }.id("\(tab.rawValue)-\(navigationRevision)")
-        }.environmentObject(history).tint(Color(white: 0.75)).progressViewStyle(FTVProgressViewStyle()).defaultFocus($focusedTab, .live)
+            }
+            .background(Color.black.ignoresSafeArea())
+            .id("\(tab.rawValue)-\(navigationRevision)")
+        }
+        .background(Color.black.ignoresSafeArea())
+        .environment(\.colorScheme, .dark)
+        .environmentObject(history).tint(Color(white: 0.75)).progressViewStyle(FTVProgressViewStyle()).defaultFocus($focusedTab, .live)
         .onChange(of: profiles.current) { _, _ in
             reminders.reload()
             if !visibleTabs.contains(tab) { tab = .home }
