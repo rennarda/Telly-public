@@ -10,7 +10,8 @@ final class ContentProvider: TVTopShelfContentProvider {
         Task { @MainActor in
             let saved = (try? Data(contentsOf: cacheURL)).flatMap { try? JSONDecoder().decode(Snapshot.self, from: $0) }
             if let saved, !saved.channels.isEmpty, saved.channels.contains(where: { $0.id.hasPrefix("c4:") }) && saved.channels.contains(where: { $0.id.hasPrefix("c5:") }), Date().timeIntervalSince(saved.date) < 600 {
-                completionHandler(content(saved.channels)); return
+                let previews = await previewURLs(saved.channels)
+                completionHandler(content(saved.channels, previews: previews)); return
             }
             let configuration = URLSessionConfiguration.ephemeral
             configuration.timeoutIntervalForRequest = 2; configuration.timeoutIntervalForResource = 4
@@ -65,26 +66,57 @@ final class ContentProvider: TVTopShelfContentProvider {
                 try? FileManager.default.createDirectory(at: cacheURL.deletingLastPathComponent(), withIntermediateDirectories: true)
                 if let data = try? JSONEncoder().encode(Snapshot(date: Date(), channels: channels)) { try? data.write(to: cacheURL, options: .atomic) }
             }
-            completionHandler(content(channels))
+            let previews = await previewURLs(channels)
+            completionHandler(content(channels, previews: previews))
         }
     }
-    @MainActor private func content(_ channels: [LiveShelfChannel]) -> TVTopShelfSectionedContent {
-        let ordered = LiveChannelOrder.sorted(channels,id:{ $0.id },title:{ $0.title })
-        let sections = LiveChannelSection.allCases.compactMap { kind -> TVTopShelfItemCollection<TVTopShelfSectionedItem>? in
-            let items = ordered.filter { LiveChannelOrder.section($0.id) == kind }.compactMap { channel -> TVTopShelfSectionedItem? in
-                guard let url = LiveChannelLink.url(for:channel.id) else { return nil }
-                let item = TVTopShelfSectionedItem(identifier:channel.id)
-                item.title = channel.title; item.imageShape = .hdtv
-                item.displayAction = TVTopShelfAction(url:url); item.playAction = TVTopShelfAction(url:url)
-                let image = channel.image ?? fallbackImage(channel)
-                item.setImageURL(image,for:.screenScale1x); item.setImageURL(image,for:.screenScale2x)
-                return item
+    /// Resolve fresh public BBC HLS URLs each time; signed URLs must not be cached in the shelf snapshot.
+    private func previewURLs(_ channels: [LiveShelfChannel]) async -> [String: URL] {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 3; config.timeoutIntervalForResource = 5
+        config.httpMaximumConnectionsPerHost = 6
+        let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel() }
+        return await withTaskGroup(of: (String, URL?).self, returning: [String: URL].self) { group in
+            for channel in channels where !channel.id.contains(":") && LiveChannelLink.validID(channel.id) {
+                group.addTask {
+                    for set in ["iptv-all", "pc"] {
+                        guard let selectorURL = URL(string: "https://open.live.bbc.co.uk/mediaselector/6/select/version/2.0/mediaset/\(set)/vpid/\(channel.id)/format/xml"),
+                              let (data, response) = try? await session.data(from: selectorURL),
+                              (response as? HTTPURLResponse)?.statusCode == 200 else { continue }
+                        let selector = ShelfMediaSelector()
+                        let parser = XMLParser(data: data); parser.delegate = selector
+                        guard parser.parse() else { continue }
+                        for url in selector.urls {
+                            guard let (manifest, response) = try? await session.data(from: url),
+                                  (response as? HTTPURLResponse)?.statusCode == 200,
+                                  let text = String(data: manifest, encoding: .utf8),
+                                  text.hasPrefix("#EXTM3U"), text.contains("#EXT-X-STREAM-INF") else { continue }
+                            return (channel.id, url)
+                        }
+                    }
+                    return (channel.id, nil)
+                }
             }
-            guard !items.isEmpty else { return nil }
-            let section = TVTopShelfItemCollection(items:items); section.title = kind.title
-            return section
+            var result: [String: URL] = [:]
+            for await (id, url) in group { if let url { result[id] = url } }
+            return result
         }
-        return TVTopShelfSectionedContent(sections:sections)
+    }
+    @MainActor private func content(_ channels: [LiveShelfChannel], previews: [String: URL]) -> TVTopShelfCarouselContent {
+        let ordered = LiveChannelOrder.sorted(channels, id: { $0.id }, title: { $0.title })
+        let items = ordered.compactMap { channel -> TVTopShelfCarouselItem? in
+            guard let url = LiveChannelLink.url(for: channel.id) else { return nil }
+            let item = TVTopShelfCarouselItem(identifier: channel.id)
+            item.title = channel.title
+            item.contextTitle = "Live TV"
+            item.playAction = TVTopShelfAction(url: url)
+            item.previewVideoURL = previews[channel.id]
+            let image = channel.image ?? fallbackImage(channel)
+            item.setImageURL(image, for: .screenScale1x); item.setImageURL(image, for: .screenScale2x)
+            return item
+        }
+        return TVTopShelfCarouselContent(style: .actions, items: items)
     }
     @MainActor private func fallbackImage(_ channel: LiveShelfChannel) -> URL? {
         let url = cacheURL.deletingLastPathComponent().appendingPathComponent("\(channel.id).png")
@@ -98,5 +130,19 @@ final class ContentProvider: TVTopShelfContentProvider {
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try? data.write(to: url, options: .atomic)
         return url
+    }
+}
+
+/// Extract only HTTPS HLS video links; captions and unrelated media are not playable previews.
+private final class ShelfMediaSelector: NSObject, XMLParserDelegate {
+    var urls: [URL] = []
+    private var isVideo = false
+    func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?, qualifiedName: String?, attributes: [String: String]) {
+        if elementName == "media" { isVideo = attributes["kind"] == "video" }
+        if elementName == "connection", isVideo, attributes["transferFormat"] == "hls",
+           let href = attributes["href"], let url = URL(string: href), url.scheme == "https", !urls.contains(url) { urls.append(url) }
+    }
+    func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName: String?) {
+        if elementName == "media" { isVideo = false }
     }
 }
