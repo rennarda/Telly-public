@@ -11,6 +11,8 @@ struct HomeView: View {
     @StateObject private var history = WatchHistory()
     @ObservedObject private var reminders = GuideReminders.shared
     @State private var liveLaunch: LiveLaunch?
+    @State private var lastLiveChannel: String?
+    @State private var lastGuideCell: String?
     @State private var tab = TellyTab.live
     @State private var navigationRevision = 0
     @FocusState private var focusedTab: TellyTab?
@@ -50,8 +52,8 @@ struct HomeView: View {
                     else { DiscoveryHome(catalogue: catalogue, library: library) }
                 case .browse: BrowseView(catalogue: catalogue, library: library, index: index)
                 case .search: CatalogueSearchView(index: index, catalogue: catalogue, library: library)
-                case .live: LiveView(launch: liveLaunch, library: library)
-                case .guide: LiveView(showGuide: true, library: library)
+                case .live: LiveView(launch: liveLaunch, library: library, lastLiveChannel: $lastLiveChannel, lastGuideCell: $lastGuideCell)
+                case .guide: LiveView(showGuide: true, library: library, lastLiveChannel: $lastLiveChannel, lastGuideCell: $lastGuideCell)
                 case .saved: SavedProgrammes(catalogue: catalogue, library: library)
                 case .settings: SettingsView(catalogue: catalogue)
                 }
@@ -603,6 +605,11 @@ struct LiveView: View {
     var launch: LiveLaunch? = nil
     var showGuide = false
     @ObservedObject var library: Library
+    @Binding var lastLiveChannel: String?
+    @Binding var lastGuideCell: String?
+    @State private var restoreGuideFocus = 0
+    @FocusState private var focusedChannel: String?
+    @Namespace private var liveFocusScope
     @Environment(\.scenePhase) private var phase
     @StateObject private var state = LiveState()
     @StateObject private var playback = PlaybackModel()
@@ -672,7 +679,7 @@ struct LiveView: View {
                         NetworkFilter(selection: $providerFilter)
                     }
                     if let error = playback.error { Text(error).foregroundStyle(.orange) }
-                    ChannelGuideView(channels: guideChannels, library: library, filter: providerFilter,
+                    ChannelGuideView(channels: guideChannels, library: library, lastFocusedCell: $lastGuideCell, restoreFocus: restoreGuideFocus, filter: providerFilter,
                                      additionalStreams: ProfileStore.shared.kidsMode || (providerFilter ?? .bbc) != .bbc ? [] : AdditionalLiveStream.all,
                                      playLive: { play($0) },
                                      playStream: { stream in playback.startAdditional(stream) { state.playing = true } },
@@ -731,7 +738,13 @@ struct LiveView: View {
         }.sheet(isPresented: $state.channel5Pairing, onDismiss: {
             if channel5Account.signedIn, let channel = state.selected, channel.provider == .channel5 { playback.startLive(channel) { state.playing = true } }
         }) { Channel5AccountView() }
-        .fullScreenCover(isPresented: $state.playing, onDismiss: { if !playback.pictureInPictureActive { playback.stop() } }) {
+        .fullScreenCover(isPresented: $state.playing, onDismiss: {
+            if !playback.pictureInPictureActive {
+                playback.stop()
+                if showGuide { restoreGuideFocus += 1 }
+                else if let lastLiveChannel { focusedChannel = lastLiveChannel }
+            }
+        }) {
             PlaybackScreen(model: playback, liveChannels: favourites.ids.isEmpty ? guideChannels : favourites.ordered(guideChannels.filter { favourites.contains($0.id) }) { $0.id }, switchChannel: { play($0, fromStart: false) }, restoreFromPictureInPicture: { completion in
                 state.playing = true
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { completion(state.playing) }
@@ -760,8 +773,9 @@ struct LiveView: View {
         }
     }
     /// A live channel; long-press to add it to or remove it from Favourites.
-    private func channelCard(_ channel: LiveChannel) -> some View {
-        Button { play(channel) } label: {
+    private func channelCard(_ channel: LiveChannel, location: String) -> some View {
+        let focusID = location + ":" + channel.id
+        return Button { play(channel) } label: {
             VStack(alignment: .leading, spacing: 12) {
                 LiveChannelPreview(channel: channel, active: phase == .active && !state.playing && !playback.loading && !playback.pictureInPictureActive, audioOnFocus: true)
                     .overlay(alignment: .topTrailing) {
@@ -775,6 +789,8 @@ struct LiveView: View {
                 HStack { Text(channel.title).font(.callout).foregroundStyle(.secondary); Spacer(); ProviderBadge(provider: channel.provider, subdued: true) }
             }.padding(12).frame(maxWidth: .infinity, alignment: .leading)
         }.buttonStyle(ProgrammeCardStyle()).disabled(playback.loading)
+        .focused($focusedChannel, equals: focusID)
+        .prefersDefaultFocus(lastLiveChannel == focusID, in: liveFocusScope)
         .contextMenu {
             Button(favourites.contains(channel.id) ? "Remove from Favourites" : "Add to Favourites",
                    systemImage: favourites.contains(channel.id) ? "star.slash" : "star") { favourites.toggle(channel.id) }
@@ -796,7 +812,7 @@ struct LiveView: View {
                 if !favouriteRow.isEmpty {
                     Text("Favourites").font(.title2).bold()
                     LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 30), count: 3), spacing: 30) {
-                        ForEach(favouriteRow) { channel in channelCard(channel) }
+                        ForEach(favouriteRow) { channel in channelCard(channel, location: "favourite") }
                     }
                 }
                 ForEach(LiveChannelSection.allCases,id:\.self) { section in
@@ -809,12 +825,14 @@ struct LiveView: View {
                             Text(section.title).font(.title2).bold().padding(.top,20)
                         }
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 30), count: 3), spacing: 30) {
-                    ForEach(channels) { channel in channelCard(channel) }
+                    ForEach(channels) { channel in channelCard(channel, location: "channel") }
                 }
                     }
                 }
             }.padding(60)
         }
+        .focusScope(liveFocusScope)
+        .onChange(of: focusedChannel) { _, value in if let value { lastLiveChannel = value } }
     }
 }
 /// Muted, independently owned previews leave full-screen playback and its DRM session untouched.
@@ -902,8 +920,9 @@ struct LiveChannelPreview: View {
     var audioOnFocus = false
     @Environment(\.scenePhase) private var phase
     @Environment(\.isFocused) private var isFocused
+    @AppStorage("liveTilePreviews") private var liveTilePreviews = true
     @StateObject private var preview = LivePreviewPlayer()
-    private var shouldPlay: Bool { active && phase == .active }
+    private var shouldPlay: Bool { liveTilePreviews && active && phase == .active }
     private var shouldPlayAudio: Bool { shouldPlay && audioOnFocus && isFocused }
     private func startPreview() {
         preview.start(channel)
@@ -932,6 +951,7 @@ struct SettingsView: View {
     @AppStorage("bbcTwoRegion") private var bbcTwo = "bbc_two_england"
     @AppStorage("offerLiveFromStart") private var offerLiveFromStart = false
     @AppStorage("automaticallySwitchScheduledProgrammes") private var autoSwitchScheduled = false
+    @AppStorage("liveTilePreviews") private var liveTilePreviews = true
     @ObservedObject var catalogue: CatalogueStore
     @ObservedObject private var profileStore = ProfileStore.shared
     @AppStorage(TellySyncSettings.urlKey) private var syncURL = ""
@@ -1013,6 +1033,9 @@ struct SettingsView: View {
                 Text("Playback automatically selects the best available quality, including 4K HDR when available. Live channel quality adapts to the stream each broadcaster supplies.").foregroundStyle(.secondary)
                 Text("Programme listings load only when you select a category or letter. Series and episodes load when you open a programme. Saved programmes include all their series.")
                 if let warning = catalogue.storageWarning { Text(warning).foregroundStyle(.orange) }
+                Toggle("Show live video in channel tiles", isOn: $liveTilePreviews)
+                Text("When off, the Live tab and channel switcher show static images instead.")
+                    .font(.system(size: 22)).foregroundStyle(.secondary)
                 Toggle("Automatically switch to scheduled programmes", isOn: $autoSwitchScheduled)
                 Text("When a guide reminder is due, switch to its channel instead of showing a prompt. Telly must be open.")
                     .font(.system(size: 22)).foregroundStyle(.secondary)

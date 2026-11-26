@@ -595,7 +595,7 @@ struct NativePlayer: UIViewControllerRepresentable {
         @objc(playerViewController:willTransitionToVisibilityOfTransportBar:withAnimationCoordinator:)
         func playerViewController(_ playerViewController: AVPlayerViewController, willTransitionToVisibilityOfTransportBar visible: Bool, with coordinator: AVPlayerViewControllerAnimationCoordinator) {
             container?.controlsVisible = visible
-            let showTitle = visible && container?.infoVisible != true
+            let showTitle = visible && container?.infoVisible != true && container?.channelsVisible != true
             self.badge.setControlsVisible(showTitle)
             coordinator.addCoordinatedAnimations({ self.badge.alpha = showTitle ? 1 : 0 }, completion: nil)
         }
@@ -644,7 +644,9 @@ final class PlayerContainerViewController: UIViewController, UIGestureRecognizer
     let playerController = AVPlayerViewController()
     let infoController = ProgrammeInfoViewController()
     private var channelController: UIHostingController<LivePlayerChannels>?
-    private var channelsVisible = false
+    private(set) var channelsVisible = false
+    private var downGesture: UITapGestureRecognizer?
+    private var swipeDownGesture: UISwipeGestureRecognizer?
     private var dismissingChannels = false
     private var channelTimeout: Task<Void, Never>?
     private var upGesture: UITapGestureRecognizer?
@@ -745,8 +747,13 @@ final class PlayerContainerViewController: UIViewController, UIGestureRecognizer
         let down = UITapGestureRecognizer(target: self, action: #selector(showChannels))
         down.allowedPressTypes = [NSNumber(value: UIPress.PressType.downArrow.rawValue)]
         down.cancelsTouchesInView = false
-        down.delegate = self
+        down.delegate = self; downGesture = down
         view.addGestureRecognizer(down)
+        let swipeDown = UISwipeGestureRecognizer(target: self, action: #selector(showChannels))
+        swipeDown.direction = .down
+        swipeDown.cancelsTouchesInView = false
+        swipeDown.delegate = self; swipeDownGesture = swipeDown
+        view.addGestureRecognizer(swipeDown)
         let up = UITapGestureRecognizer(target: self, action: #selector(dismissChannelsOnUp))
         up.allowedPressTypes = [NSNumber(value: UIPress.PressType.upArrow.rawValue)]
         up.cancelsTouchesInView = true
@@ -768,6 +775,12 @@ final class PlayerContainerViewController: UIViewController, UIGestureRecognizer
         if let backGesture { backGesture.view?.removeGestureRecognizer(backGesture) }
         channelTimeout?.cancel(); channelTimeout = nil
         super.viewDidDisappear(animated)
+    }
+    func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        if gestureRecognizer === downGesture || gestureRecognizer === swipeDownGesture {
+            return !infoVisible && !channelsVisible && !dismissingChannels && !channelItems.isEmpty && presentedViewController == nil
+        }
+        return true
     }
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
         gestureRecognizer !== backGesture && otherGestureRecognizer !== backGesture
@@ -933,8 +946,8 @@ final class ProgrammeInfoViewController: UIViewController {
         poster.contentMode = .scaleAspectFill; poster.clipsToBounds = true
         poster.layer.cornerRadius = 12
         heading.font = .systemFont(ofSize: 28, weight: .semibold); heading.textColor = .white
-        synopsis.font = .systemFont(ofSize: 24); synopsis.textColor = .lightGray; synopsis.numberOfLines = 0
-        footer.font = .systemFont(ofSize: 23); footer.textColor = .white
+        synopsis.font = .preferredFont(forTextStyle: .callout); synopsis.textColor = .lightGray; synopsis.numberOfLines = 0
+        footer.font = .preferredFont(forTextStyle: .callout); footer.textColor = .white
         heading.accessibilityIdentifier = "ProgrammeInfoTitle"
         footer.accessibilityIdentifier = "ProgrammeInfoFooter"
         scroll.accessibilityIdentifier = "ProgrammeInfoDescription"

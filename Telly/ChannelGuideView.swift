@@ -13,6 +13,8 @@ struct GuideSelection: Identifiable {
 struct ChannelGuideView: View {
     let channels: [LiveChannel]
     @ObservedObject var library: Library
+    @Binding var lastFocusedCell: String?
+    var restoreFocus: Int = 0
     /// Show one broadcaster's rows; the schedules for every channel stay loaded, so switching is instant.
     var filter: ContentProvider? = nil
     /// Event streams without a published schedule (Red Button), listed under the channels.
@@ -140,7 +142,12 @@ struct ChannelGuideView: View {
                 do { try await Task.sleep(nanoseconds: 600_000_000_000) } catch { return }
             }
         }
+        .onChange(of: restoreFocus) { _, _ in
+            if let lastFocusedCell { focusedCell = lastFocusedCell }
+        }
+        .defaultFocus($focusedCell, lastFocusedCell)
         .onChange(of: focusedCell) { old, cell in
+            if let cell, !cell.hasPrefix(Self.edgePrefix) { lastFocusedCell = cell }
             lastFocusMove = Date()
             guard let cell else { return }
             if cell.hasPrefix(Self.edgePrefix) {
@@ -194,31 +201,31 @@ struct ChannelGuideView: View {
                     .font(.system(size: 34, weight: .bold)).lineLimit(1)
                 HStack(spacing: 18) {
                     Text((Calendar.current.isDateInToday(focused.entry.start) ? "" : Self.dayName(focused.entry.start, now: now) + " ") + ChannelGuide.times(focused.entry))
-                        .font(.system(size: 25, weight: .medium).monospaced())
-                    Text(focused.channel.title).font(.system(size: 25)).foregroundStyle(.secondary)
-                    if focused.entry.isOnAir(at: now) { Text("On now").font(.system(size: 25, weight: .semibold)).foregroundStyle(.pink) }
-                    else if focused.entry.onDemand { Text(focused.entry.isPast(at: now) ? "Shown earlier · available on demand" : "Available on demand").font(.system(size: 25, weight: .semibold)).foregroundStyle(.teal) }
-                    else if focused.entry.isPast(at: now), focused.entry.catchUp != nil { Text("Shown earlier · look up on ITVX").font(.system(size: 25, weight: .semibold)).foregroundStyle(.teal) }
-                    else if focused.entry.isPast(at: now) { Text("Shown earlier · not available").font(.system(size: 25, weight: .semibold)).foregroundStyle(.secondary) }
+                        .font(.callout.monospaced().weight(.medium))
+                    Text(focused.channel.title).font(.callout).foregroundStyle(.secondary)
+                    if focused.entry.isOnAir(at: now) { Text("On now").font(.callout.weight(.semibold)).foregroundStyle(.pink) }
+                    else if focused.entry.onDemand { Text(focused.entry.isPast(at: now) ? "Shown earlier · available on demand" : "Available on demand").font(.callout.weight(.semibold)).foregroundStyle(.teal) }
+                    else if focused.entry.isPast(at: now), focused.entry.catchUp != nil { Text("Shown earlier · look up on ITVX").font(.callout.weight(.semibold)).foregroundStyle(.teal) }
+                    else if focused.entry.isPast(at: now) { Text("Shown earlier · not available").font(.callout.weight(.semibold)).foregroundStyle(.secondary) }
                 }
-                Text(focused.entry.synopsis).font(.system(size: 25)).foregroundStyle(.secondary).lineLimit(2)
+                Text(focused.entry.synopsis).font(.callout).foregroundStyle(.secondary).lineLimit(2)
             } else if let channel = focusedHold {
                 Text(channel.current?.title ?? channel.title).font(.system(size: 34, weight: .bold)).lineLimit(1)
                 HStack(spacing: 18) {
                     if let current = channel.current, let start = current.start {
-                        Text("\(ChannelGuide.clock(start)) – \(ChannelGuide.clock(current.end))").font(.system(size: 25, weight: .medium).monospaced())
+                        Text("\(ChannelGuide.clock(start)) – \(ChannelGuide.clock(current.end))").font(.callout.monospaced().weight(.medium))
                     }
-                    Text(channel.title).font(.system(size: 25)).foregroundStyle(.secondary)
-                    if channel.current != nil { Text("On now").font(.system(size: 25, weight: .semibold)).foregroundStyle(.pink) }
+                    Text(channel.title).font(.callout).foregroundStyle(.secondary)
+                    if channel.current != nil { Text("On now").font(.callout.weight(.semibold)).foregroundStyle(.pink) }
                 }
-                Text("This channel doesn't publish a schedule for this time. Select to watch it live.").font(.system(size: 25)).foregroundStyle(.secondary).lineLimit(2)
+                Text("This channel doesn't publish a schedule for this time. Select to watch it live.").font(.callout).foregroundStyle(.secondary).lineLimit(2)
             } else if let stream = focusedStream {
                 Text(stream.title).font(.system(size: 34, weight: .bold)).lineLimit(1)
-                Text(Self.streamDescription(stream)).font(.system(size: 25)).foregroundStyle(.secondary).lineLimit(2)
+                Text(Self.streamDescription(stream)).font(.callout).foregroundStyle(.secondary).lineLimit(2)
             } else {
                 Text("Channel guide").font(.system(size: 34, weight: .bold))
                 Text("Select a programme that is on now to watch it live. Move left for earlier programmes you can still watch, right for what is on later.")
-                    .font(.system(size: 25)).foregroundStyle(.secondary).lineLimit(2)
+                    .font(.callout).foregroundStyle(.secondary).lineLimit(2)
             }
         }.frame(maxWidth: .infinity, minHeight: 124, maxHeight: 124, alignment: .topLeading)
     }
@@ -635,17 +642,17 @@ private struct GuideEntryDetail: View {
         HStack(alignment: .top, spacing: 40) {
         VStack(alignment: .leading, spacing: 26) {
             Text(selection.entry.title).font(.largeTitle).bold()
-            if !selection.entry.subtitle.isEmpty { Text(selection.entry.subtitle).font(.title2) }
+            if !selection.entry.subtitle.isEmpty { Text(selection.entry.subtitle).font(.callout) }
             HStack(spacing: 18) {
-                Text(ChannelGuide.times(selection.entry)).font(.title3.monospaced())
-                Text(selection.channel.title).font(.title3).foregroundStyle(.secondary)
+                Text(ChannelGuide.times(selection.entry)).font(.callout.monospaced())
+                Text(selection.channel.title).font(.callout).foregroundStyle(.secondary)
                 if past { Text("Shown earlier").font(.callout).foregroundStyle(.secondary) }
                 if selection.entry.isRepeat { Text("Repeat").font(.callout).foregroundStyle(.secondary) }
             }
             if reminders.contains(selection.entry, selection.channel) {
                 Text("Reminder set. Telly must be open to alert you.").font(.callout).foregroundStyle(.secondary)
             }
-            if !selection.entry.synopsis.isEmpty { Text(selection.entry.synopsis).font(.title3) }
+            if !selection.entry.synopsis.isEmpty { Text(selection.entry.synopsis).font(.callout) }
             if let error { Text(error).foregroundStyle(.orange).font(.callout) }
             HStack(spacing: 24) {
                 if selection.entry.start > Date() {
